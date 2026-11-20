@@ -35,6 +35,14 @@ app.use(cors({ origin: true, credentials: true }));
 app.use(express.json({ limit: '25mb' }));
 app.use(express.urlencoded({ extended: true, limit: '25mb' }));
 
+// Global JSON Parse Error Handler for malformed payloads
+app.use((err, req, res, next) => {
+  if (err instanceof SyntaxError && err.status === 400 && 'body' in err) {
+    return res.status(400).json({ error: 'Invalid JSON request payload format.' });
+  }
+  next(err);
+});
+
 // Helper: Basic Token Generator (In prod: JWT)
 function createToken(user) {
   return Buffer.from(
@@ -111,7 +119,7 @@ app.get('/api/health', (req, res) => {
 // ==========================================
 app.post('/api/auth/register', (req, res) => {
   try {
-    const { name, email, password } = req.body;
+    const { name, email, password } = req.body || {};
     if (!name || !email || !password) {
       return res.status(400).json({ error: 'Name, email, and password are required.' });
     }
@@ -130,13 +138,14 @@ app.post('/api/auth/register', (req, res) => {
       user: { id: user.id, name: user.name, email: user.email, role: user.role },
     });
   } catch (err) {
-    res.status(400).json({ error: err.message });
+    console.error('Registration error:', err);
+    res.status(400).json({ error: err.message || 'Registration failed.' });
   }
 });
 
 app.post('/api/auth/login', (req, res) => {
   try {
-    const { email, password } = req.body;
+    const { email, password } = req.body || {};
     if (!email || !password) {
       return res.status(400).json({ error: 'Email and password are required.' });
     }
@@ -159,32 +168,44 @@ app.post('/api/auth/login', (req, res) => {
       },
     });
   } catch (err) {
-    res.status(500).json({ error: err.message });
+    console.error('Error in /api/auth/login:', err);
+    res.status(500).json({ error: 'Login service temporarily unavailable.' });
   }
 });
 
 app.post('/api/auth/reset-password', (req, res) => {
-  const { email, newPassword } = req.body;
-  const user = findUserByEmail(email);
-  if (!user) {
-    return res.status(404).json({ error: 'No account found with this email.' });
-  }
+  try {
+    const { email, newPassword } = req.body || {};
+    if (!email) {
+      return res.status(400).json({ error: 'Email address is required.' });
+    }
+    const user = findUserByEmail(email);
+    if (!user) {
+      return res.status(404).json({ error: 'No account found with this email.' });
+    }
 
-  user.passwordHash = newPassword || 'reset123';
-  const db = getDb();
-  const idx = db.users.findIndex((u) => u.id === user.id);
-  if (idx !== -1) {
-    db.users[idx] = user;
-    saveDb(db);
-  }
+    user.passwordHash = newPassword || 'reset123';
+    const db = getDb();
+    const idx = db.users.findIndex((u) => u.id === user.id);
+    if (idx !== -1) {
+      db.users[idx] = user;
+      saveDb(db);
+    }
 
-  res.json({ success: true, message: 'Password has been updated. You can now log in.' });
+    res.json({
+      success: true,
+      message: 'Password successfully updated. You may now sign in with your new password.',
+    });
+  } catch (err) {
+    console.error('Error in /api/auth/reset-password:', err);
+    res.status(500).json({ error: 'Password reset service temporarily unavailable.' });
+  }
 });
 
 // ==========================================
 // 3. ADMIN DASHBOARD STATS (Module 1.2)
 // ==========================================
-app.get('/api/admin/stats', (req, res) => {
+app.get('/api/admin/stats', requireAdmin, (req, res) => {
   try {
     const stats = getAdminStats();
     res.json({ success: true, stats });
@@ -383,7 +404,7 @@ app.get('/api/requests/:id', (req, res) => {
 });
 
 // Partner Allocation (Admin action with override support)
-app.post('/api/requests/:id/assign', (req, res) => {
+app.post('/api/requests/:id/assign', requireAdmin, (req, res) => {
   try {
     const { partnerId, adminUser, reason } = req.body;
     if (!partnerId) {
@@ -520,7 +541,7 @@ app.get('/api/partners', (req, res) => {
   }
 });
 
-app.post('/api/partners', (req, res) => {
+app.post('/api/partners', requireAdmin, (req, res) => {
   try {
     const db = getDb();
     const partnerData = req.body;
@@ -660,6 +681,17 @@ app.post('/api/partners/match', (req, res) => {
     console.error('Error in /api/partners/match:', err);
     res.status(500).json({ success: false, error: err.message || 'Partner matching failed' });
   }
+});
+
+// Fallback 404 for unknown /api routes
+app.use('/api', (req, res) => {
+  res.status(404).json({ error: `API endpoint '${req.originalUrl}' not found.` });
+});
+
+// Global Error Handler (never leak HTML or stack traces)
+app.use((err, req, res, next) => {
+  console.error('Unhandled server error:', err);
+  res.status(500).json({ error: 'Internal server error. Please try again later.' });
 });
 
 // Start Server if not running in serverless environment

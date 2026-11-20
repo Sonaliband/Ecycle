@@ -49,6 +49,22 @@
       "name": "Ananya Sharma",
       "role": "resident",
       "createdAt": 1795171915408
+    },
+    {
+      "id": "USR-654810",
+      "email": "customer_test_1795188654803@example.com",
+      "passwordHash": "securePassword123",
+      "name": "Test Customer",
+      "role": "resident",
+      "createdAt": 1795188654810
+    },
+    {
+      "id": "USR-731296",
+      "email": "reg_user_1795188731273@example.com",
+      "passwordHash": "securePassword123",
+      "name": "Automated Test User",
+      "role": "resident",
+      "createdAt": 1795188731296
     }
   ],
   "partners": [
@@ -918,6 +934,20 @@
     }
   ],
   "auditLogs": [
+    {
+      "id": "LOG-1795188731296",
+      "action": "USER_REGISTERED",
+      "user": "reg_user_1795188731273@example.com",
+      "at": 1795188731296,
+      "details": "Registered new account with role resident"
+    },
+    {
+      "id": "LOG-1795188654810",
+      "action": "USER_REGISTERED",
+      "user": "customer_test_1795188654803@example.com",
+      "at": 1795188654810,
+      "details": "Registered new account with role resident"
+    },
     {
       "id": "LOG-1795172722176",
       "action": "STATUS_UPDATED",

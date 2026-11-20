@@ -81,13 +81,75 @@ export function getSavedToken(): string | null {
   return sessionStorage.getItem(TOKEN_KEY) || localStorage.getItem(TOKEN_KEY);
 }
 
+/**
+ * Safe fetch wrapper that handles network disconnects and connection errors.
+ */
+export async function safeFetch(url: string, options: RequestInit = {}): Promise<Response> {
+  try {
+    return await fetch(url, options);
+  } catch {
+    throw new Error('Unable to connect to server.');
+  }
+}
+
+/**
+ * Safely parses any Response as JSON.
+ * If the response body is empty, HTML, or malformed, it handles it gracefully
+ * without throwing "Unexpected end of JSON input".
+ */
+export async function safeParseJson<T = any>(
+  res: Response,
+  fallbackError = 'Request failed'
+): Promise<T> {
+  let text = '';
+  try {
+    text = await res.text();
+  } catch {
+    text = '';
+  }
+
+  let data: any = null;
+  if (text && text.trim().length > 0) {
+    try {
+      data = JSON.parse(text);
+    } catch {
+      data = null;
+    }
+  }
+
+  if (!res.ok) {
+    if (res.status === 401) {
+      throw new Error(data?.error || 'Invalid email or password.');
+    }
+    if (res.status === 403) {
+      throw new Error(data?.error || 'Access denied: You do not have permission.');
+    }
+    if (res.status === 404) {
+      throw new Error(data?.error || 'Requested service or resource not found.');
+    }
+    if (res.status === 502 || res.status === 503 || res.status === 504 || res.status === 405) {
+      throw new Error('Unable to connect to server.');
+    }
+    if (res.status >= 500) {
+      throw new Error(data?.error || 'Login service temporarily unavailable.');
+    }
+    throw new Error(data?.error || fallbackError);
+  }
+
+  if (data === null) {
+    return {} as T;
+  }
+
+  return data as T;
+}
+
 export async function authFetch(url: string, options: RequestInit = {}): Promise<Response> {
   const token = getSavedToken();
   const headers = new Headers(options.headers || {});
   if (token && !headers.has('Authorization')) {
     headers.set('Authorization', `Bearer ${token}`);
   }
-  return fetch(url, { ...options, headers });
+  return safeFetch(url, { ...options, headers });
 }
 
 // Session Helpers
@@ -117,15 +179,23 @@ export function clearSession() {
 
 // Auth API Calls
 export async function loginUser(email: string, password: string): Promise<UserSession> {
-  const res = await fetch('/api/auth/login', {
+  if (!email?.trim() || !password) {
+    throw new Error('Email and password are required.');
+  }
+
+  const res = await safeFetch('/api/auth/login', {
     method: 'POST',
     headers: { 'Content-Type': 'application/json' },
-    body: JSON.stringify({ email, password }),
+    body: JSON.stringify({ email: email.trim(), password }),
   });
 
-  const data = await res.json();
-  if (!res.ok) {
-    throw new Error(data.error || 'Failed to sign in');
+  const data = await safeParseJson<{ success: boolean; user: UserSession; token: string }>(
+    res,
+    'Invalid email or password.'
+  );
+
+  if (!data?.user) {
+    throw new Error('Invalid email or password.');
   }
 
   saveSession(data.user, data.token);
@@ -133,15 +203,23 @@ export async function loginUser(email: string, password: string): Promise<UserSe
 }
 
 export async function registerCustomer(name: string, email: string, password: string): Promise<UserSession> {
-  const res = await fetch('/api/auth/register', {
+  if (!name?.trim()) throw new Error('Please enter your full name');
+  if (!email?.trim()) throw new Error('Please enter your email');
+  if (!password || password.length < 6) throw new Error('Password must be at least 6 characters long.');
+
+  const res = await safeFetch('/api/auth/register', {
     method: 'POST',
     headers: { 'Content-Type': 'application/json' },
-    body: JSON.stringify({ name, email, password }),
+    body: JSON.stringify({ name: name.trim(), email: email.trim(), password }),
   });
 
-  const data = await res.json();
-  if (!res.ok) {
-    throw new Error(data.error || 'Failed to register account');
+  const data = await safeParseJson<{ success: boolean; user: UserSession; token: string }>(
+    res,
+    'Failed to register account'
+  );
+
+  if (!data?.user) {
+    throw new Error('Failed to register account');
   }
 
   saveSession(data.user, data.token);
@@ -149,15 +227,20 @@ export async function registerCustomer(name: string, email: string, password: st
 }
 
 export async function resetPassword(email: string, newPassword?: string): Promise<string> {
+  if (!email?.trim()) throw new Error('Email address is required.');
+
   const res = await authFetch('/api/auth/reset-password', {
     method: 'POST',
     headers: { 'Content-Type': 'application/json' },
-    body: JSON.stringify({ email, newPassword }),
+    body: JSON.stringify({ email: email.trim(), newPassword: newPassword?.trim() }),
   });
 
-  const data = await res.json();
-  if (!res.ok) throw new Error(data.error || 'Password reset failed');
-  return data.message;
+  const data = await safeParseJson<{ success: boolean; message: string }>(
+    res,
+    'Password reset failed'
+  );
+
+  return data?.message || 'Password updated successfully.';
 }
 
 // Device API Calls
@@ -195,9 +278,8 @@ export async function fetchDevices(params: { ownerEmail?: string; role?: string 
   if (params.role) query.set('role', params.role);
 
   const res = await authFetch(`/api/devices?${query.toString()}`);
-  if (!res.ok) throw new Error('Failed to load devices');
-  const data = await res.json();
-  return data.devices;
+  const data = await safeParseJson<{ devices: DeviceItem[] }>(res, 'Failed to load devices');
+  return data.devices || [];
 }
 
 export async function saveDevice(device: Partial<DeviceItem>): Promise<DeviceItem> {
@@ -206,8 +288,7 @@ export async function saveDevice(device: Partial<DeviceItem>): Promise<DeviceIte
     headers: { 'Content-Type': 'application/json' },
     body: JSON.stringify(device),
   });
-  const data = await res.json();
-  if (!res.ok) throw new Error(data.error || 'Failed to save device');
+  const data = await safeParseJson<{ device: DeviceItem }>(res, 'Failed to save device');
   return data.device;
 }
 
@@ -219,8 +300,7 @@ export async function removeDevice(id: string): Promise<boolean> {
 // Admin Stats
 export async function fetchAdminStats(): Promise<AdminStatsData> {
   const res = await authFetch('/api/admin/stats');
-  if (!res.ok) throw new Error('Failed to load admin stats');
-  const data = await res.json();
+  const data = await safeParseJson<{ stats: AdminStatsData }>(res, 'Failed to load admin stats');
   return data.stats;
 }
 
@@ -231,8 +311,7 @@ export async function createRequest(reqData: Partial<RequestItem>): Promise<Requ
     headers: { 'Content-Type': 'application/json' },
     body: JSON.stringify(reqData),
   });
-  const data = await res.json();
-  if (!res.ok) throw new Error(data.error || 'Failed to submit request');
+  const data = await safeParseJson<{ request: RequestItem }>(res, 'Failed to submit request');
   return data.request;
 }
 
@@ -253,9 +332,8 @@ export async function fetchRequests(params: {
   if (params.role) query.set('role', params.role);
 
   const res = await authFetch(`/api/requests?${query.toString()}`);
-  if (!res.ok) throw new Error('Failed to fetch requests');
-  const data = await res.json();
-  return data.requests;
+  const data = await safeParseJson<{ requests: RequestItem[] }>(res, 'Failed to fetch requests');
+  return data.requests || [];
 }
 
 export async function assignRequestPartner(
@@ -270,8 +348,7 @@ export async function assignRequestPartner(
     body: JSON.stringify({ partnerId, adminUser, reason }),
   });
 
-  const data = await res.json();
-  if (!res.ok) throw new Error(data.error || 'Failed to assign partner');
+  const data = await safeParseJson<{ request: RequestItem }>(res, 'Failed to assign partner');
   return data.request;
 }
 
@@ -301,8 +378,7 @@ export async function updateStatus(
     body: JSON.stringify({ status, user, note, ...optionalData }),
   });
 
-  const data = await res.json();
-  if (!res.ok) throw new Error(data.error || 'Failed to update request status');
+  const data = await safeParseJson<{ request: RequestItem }>(res, 'Failed to update request status');
   return data.request;
 }
 
@@ -313,17 +389,15 @@ export async function addInternalNote(requestId: string, note: string, user: str
     body: JSON.stringify({ note, user }),
   });
 
-  const data = await res.json();
-  if (!res.ok) throw new Error(data.error || 'Failed to add note');
-  return data.internalNotes;
+  const data = await safeParseJson<{ internalNotes: string[] }>(res, 'Failed to add note');
+  return data.internalNotes || [];
 }
 
 // Partner API Calls
 export async function fetchPartners(): Promise<PartnerItem[]> {
   const res = await authFetch('/api/partners');
-  if (!res.ok) throw new Error('Failed to load partners');
-  const data = await res.json();
-  return data.partners;
+  const data = await safeParseJson<{ partners: PartnerItem[] }>(res, 'Failed to load partners');
+  return data.partners || [];
 }
 
 export async function savePartner(partner: Partial<PartnerItem>): Promise<PartnerItem> {
@@ -333,8 +407,7 @@ export async function savePartner(partner: Partial<PartnerItem>): Promise<Partne
     body: JSON.stringify(partner),
   });
 
-  const data = await res.json();
-  if (!res.ok) throw new Error(data.error || 'Failed to save partner');
+  const data = await safeParseJson<{ partner: PartnerItem }>(res, 'Failed to save partner');
   return data.partner;
 }
 
@@ -343,8 +416,7 @@ export async function togglePartnerAvailability(id: string): Promise<PartnerItem
     method: 'POST',
   });
 
-  const data = await res.json();
-  if (!res.ok) throw new Error(data.error || 'Failed to toggle availability');
+  const data = await safeParseJson<{ partner: PartnerItem }>(res, 'Failed to toggle availability');
   return data.partner;
 }
 
@@ -376,14 +448,17 @@ export async function fetchRecommendation(deviceData: {
   missingParts?: boolean;
   working?: boolean;
 }): Promise<RecommendationData> {
-  const res = await fetch('/api/recommend', {
+  const res = await safeFetch('/api/recommend', {
     method: 'POST',
     headers: { 'Content-Type': 'application/json' },
     body: JSON.stringify(deviceData),
   });
 
-  const data = await res.json();
-  if (!res.ok || !data.success) throw new Error(data.error || 'Failed to obtain recommendation');
+  const data = await safeParseJson<RecommendationData & { success?: boolean; error?: string }>(
+    res,
+    'Failed to obtain recommendation'
+  );
+  if (data.success === false) throw new Error(data.error || 'Failed to obtain recommendation');
   return data;
 }
 
@@ -402,14 +477,17 @@ export async function sendChatMessage(
   userEmail?: string | null,
   userName?: string | null
 ): Promise<{ reply: string; source: string }> {
-  const res = await fetch('/api/chat', {
+  const res = await safeFetch('/api/chat', {
     method: 'POST',
     headers: { 'Content-Type': 'application/json' },
     body: JSON.stringify({ message, history, userEmail, userName }),
   });
 
-  const data = await res.json();
-  if (!res.ok || !data.success) throw new Error(data.error || 'Failed to reach AI assistant');
+  const data = await safeParseJson<{ reply: string; source: string; success?: boolean; error?: string }>(
+    res,
+    'Failed to reach AI assistant'
+  );
+  if (data.success === false) throw new Error(data.error || 'Failed to reach AI assistant');
   return data;
 }
 
@@ -438,14 +516,17 @@ export async function fetchPriceEstimate(deviceData: {
   powersOn?: boolean;
   damage?: string;
 }): Promise<PriceEstimateData> {
-  const res = await fetch('/api/estimate-price', {
+  const res = await safeFetch('/api/estimate-price', {
     method: 'POST',
     headers: { 'Content-Type': 'application/json' },
     body: JSON.stringify(deviceData),
   });
 
-  const data = await res.json();
-  if (!res.ok || !data.success) throw new Error(data.error || 'Failed to estimate price');
+  const data = await safeParseJson<PriceEstimateData & { success?: boolean; error?: string }>(
+    res,
+    'Failed to estimate price'
+  );
+  if (data.success === false) throw new Error(data.error || 'Failed to estimate price');
   return data;
 }
 
@@ -482,14 +563,17 @@ export async function fetchPartnerMatches(criteria: {
   pincode?: string;
   unsafe?: boolean;
 }): Promise<PartnerMatchResponse> {
-  const res = await fetch('/api/partners/match', {
+  const res = await safeFetch('/api/partners/match', {
     method: 'POST',
     headers: { 'Content-Type': 'application/json' },
     body: JSON.stringify(criteria),
   });
 
-  const data = await res.json();
-  if (!res.ok || !data.success) throw new Error(data.error || 'Partner matching failed');
+  const data = await safeParseJson<PartnerMatchResponse & { success?: boolean; error?: string }>(
+    res,
+    'Partner matching failed'
+  );
+  if (data.success === false) throw new Error(data.error || 'Partner matching failed');
   return data;
 }
 
